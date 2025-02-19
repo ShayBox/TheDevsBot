@@ -1,0 +1,21 @@
+[package]
+name = "the-devs-bot"
+version = "4.2.0-69"
+edition = "2021"
+
+[dependencies]
+color-eyre = "0.6"
+derive-config = { version = "2", default-features = false, features = ["toml"] }
+serde = "1"
+serenity = "0.12"
+tokio = { version = "1", features = ["full"] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
