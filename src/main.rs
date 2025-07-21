@@ -6,11 +6,18 @@ use serenity::{
         ActivityData,
         ActivityType,
         ChannelId,
+        Command,
+        CommandInteraction,
+        CreateCommand,
+        CreateInteractionResponse,
+        CreateInteractionResponseMessage,
         GuildId,
+        Interaction,
         OnlineStatus,
         PermissionOverwrite,
         PermissionOverwriteType,
         Ready,
+        RoleId,
         VoiceState,
     },
     async_trait,
@@ -25,14 +32,17 @@ struct Config {
     /// Discord token
     token: String,
 
-    /// Discord guild id
+    /// Discord guild ID
     guild: GuildId,
 
-    /// The public voice channel id which gives users access to the video channel when joining
+    /// The public voice channel ID, which gives users access to the video channel when joining.
     voice: ChannelId,
 
-    /// The public video channel id which users are given access to when joining the voice channel
+    /// The public video channel ID, which users are given access to when joining the voice channel.
     video: ChannelId,
+
+    /// The alerts role ID that users can add/remove with the /alerts command.
+    alerts: RoleId,
 }
 
 impl TypeMapKey for Config {
@@ -47,13 +57,21 @@ impl EventHandler for Events {
         println!("Ready: {}", data_about_bot.user.name);
 
         let activity = ActivityData {
-            name:  String::from("with fire"),
+            name:  String::from("with commands"),
             kind:  ActivityType::Playing,
             state: None,
             url:   None,
         };
 
         ctx.set_presence(Some(activity), OnlineStatus::Online);
+
+        let command =
+            CreateCommand::new("alerts").description("Toggle the alerts role for yourself");
+
+        match Command::create_global_command(&ctx.http, command).await {
+            Ok(_) => println!("Successfully registered /alerts command"),
+            Err(error) => eprintln!("Error creating command: {error}"),
+        }
     }
 
     async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
@@ -98,7 +116,7 @@ impl EventHandler for Events {
                     let result = guild_id.move_member(&ctx, new.user_id, config.video).await;
                     if let Err(error) = result {
                         eprintln!("Error moving channel: {error}");
-                    };
+                    }
                 }
             }
         }
@@ -128,9 +146,112 @@ impl EventHandler for Events {
 
             if let Err(error) = result {
                 eprintln!("Error updating channel permissions: {error}");
-            };
+            }
         }
     }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        if let Interaction::Command(command) = interaction {
+            if let Err(error) = handle_command(&ctx, &command).await {
+                eprintln!("Error handling command: {error}");
+            }
+        }
+    }
+}
+
+async fn handle_command(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    #[allow(clippy::single_match_else)]
+    match command.data.name.as_str() {
+        "alerts" => handle_alerts_command(ctx, command).await?,
+        _ => {
+            let response = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("Unknown command")
+                    .ephemeral(true),
+            );
+
+            command.create_response(&ctx.http, response).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_alerts_command(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let data = ctx.data.read().await;
+    let Some(config) = data.get::<Config>() else {
+        let response = CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .content("Configuration not found")
+                .ephemeral(true),
+        );
+        command.create_response(&ctx.http, response).await?;
+        return Ok(());
+    };
+
+    let Some(guild_id) = command.guild_id else {
+        let response = CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .content("This command can only be used in a guild")
+                .ephemeral(true),
+        );
+        command.create_response(&ctx.http, response).await?;
+        return Ok(());
+    };
+
+    if guild_id != config.guild {
+        let response = CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .content("This command is not available in this guild")
+                .ephemeral(true),
+        );
+        command.create_response(&ctx.http, response).await?;
+        return Ok(());
+    }
+
+    if config.alerts.get() == 0 {
+        let response = CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .content("Alerts role is not configured. Please contact an administrator.")
+                .ephemeral(true),
+        );
+        command.create_response(&ctx.http, response).await?;
+        return Ok(());
+    }
+
+    let member = guild_id.member(&ctx.http, command.user.id).await?;
+    let has_role = member.roles.contains(&config.alerts);
+
+    let (message, success) = if has_role {
+        match member.remove_role(&ctx.http, config.alerts).await {
+            Ok(()) => ("Successfully removed the alerts role!", true),
+            Err(_) => (
+                "Failed to remove the alerts role. Please contact an administrator.",
+                false,
+            ),
+        }
+    } else {
+        match member.add_role(&ctx.http, config.alerts).await {
+            Ok(()) => ("Successfully added the alerts role!", true),
+            Err(_) => (
+                "Failed to add the alerts role. Please contact an administrator.",
+                false,
+            ),
+        }
+    };
+
+    let response = CreateInteractionResponse::Message(
+        CreateInteractionResponseMessage::new()
+            .content(message)
+            .ephemeral(true),
+    );
+    command.create_response(&ctx.http, response).await?;
+
+    if success {
+        let action = if has_role { "removed" } else { "added" };
+        println!("[{}] {} the alerts role", command.user.name, action);
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
